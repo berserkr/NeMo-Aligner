@@ -24,10 +24,19 @@ from nemo_aligner.utils.server_utils import (
     pad_batch_and_strip_sequence
 )
 
-import jsonlines
 from tqdm import tqdm, trange
-
 import numpy as np
+
+
+# reward bench stuff...
+from rewardbench import load_eval_dataset
+from rewardbench.constants import EXAMPLE_COUNTS, SUBSET_MAPPING
+from rewardbench.utils import calculate_scores_per_section
+
+from transformers import AutoTokenizer
+
+import logging
+import sys
 
 
 SYSTEM_PROMPT = (
@@ -51,24 +60,8 @@ ALL_STEERLM_ATTRIBUTES = OPEN_ASSISTANT_ATTRIBUTES + HELPSTEER_ATTRIBUTES
 
 REWARD_VECTOR_340B = [0, 0, 0, 0, 0.3, 0.74, 0.46, 0.47, -0.33]
 REWARD_VECTOR_70B = [0, 0, 0, 0, 0.65, 0.8, 0.45,0.55, -0.4]
-#REWARD_VECTOR_70B = REWARD_VECTOR_340B
+REWARD_VECTOR = REWARD_VECTOR_340B
 
-# reward bench stuff...
-from rewardbench import (
-    DPO_MODEL_CONFIG,
-    REWARD_MODEL_CONFIG,
-    check_tokenizer_chat_template,
-    load_preference_dataset,
-)
-
-from rewardbench import load_eval_dataset
-from rewardbench.constants import EXAMPLE_COUNTS, SUBSET_MAPPING
-from rewardbench.utils import calculate_scores_per_section
-
-from transformers import AutoTokenizer
-
-import logging
-import sys
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -87,11 +80,6 @@ def print_rank_0(message):
             print(message, flush=True)
     else:
         print(message, flush=True)
-
-
-def _str_list2numpy(str_list: List[str]) -> np.ndarray:
-    str_ndarray = np.array(str_list)[..., np.newaxis]
-    return np.char.encode(str_ndarray, "utf-8")
 
 
 def jsonline_to_turns(jsonl):
@@ -257,13 +245,9 @@ def run_rm_or_critic_inference(infer_fn, sentences = None, add_EOS = None, token
 def get_reward(
     sentences: List[str], infer_fn, tokenize_func, model_forward_micro_batch_size = [2], strip_sequence_length_to_multiple = None
 ):
-    #TODO - check if this is required...
-    #sentences = _str_list2numpy(sentences)
 
     print_rank_0(f'Running get reward with input={sentences}')
-    #print_rank_0(f'Shape of sentences={sentences.shape}')
 
-    #sentences = decode_bytes_ndarray(sentences)
     tokens, sequence_lengths = tokenize_func(sentences)
     sequence_lengths = sequence_lengths.unsqueeze(-1)
 
@@ -310,12 +294,11 @@ def get_scores(infer_fn, tokenize_func, sample_batch, model_forward_micro_batch_
         if len(reward) == 2: # likely 2d arr
             reward = reward[0]
 
+        # hack, check if we have 5 or 9 scores
         if len(reward) == 9: 
-            valid_9 = True
             valid_5 = False
         elif len(reward) == 5:
             valid_5 = True
-            valid_9 = False
         else:
             continue
 
@@ -326,10 +309,10 @@ def get_scores(infer_fn, tokenize_func, sample_batch, model_forward_micro_batch_
 
         if valid_5:
             reward_string = ",".join(f"{a}:{r}" for a, r in zip(HELPSTEER_ATTRIBUTES, reward_each))
-            score = sum([REWARD_VECTOR_70B[4:][i] * reward[i] for i in range(0,len(REWARD_VECTOR_70B[4:]))])
+            score = sum([REWARD_VECTOR[4:][i] * reward[i] for i in range(0,len(REWARD_VECTOR[4:]))])
         else:
             reward_string = ",".join(f"{a}:{r}" for a, r in zip(ALL_STEERLM_ATTRIBUTES, reward_each))
-            score = sum([REWARD_VECTOR_70B[i] * reward[i] for i in range(0,len(REWARD_VECTOR_70B))])
+            score = sum([REWARD_VECTOR[i] * reward[i] for i in range(0,len(REWARD_VECTOR))])
         
         labels.append({'reward_string' : reward_string})
         scores.append({'score' : score})
@@ -341,10 +324,8 @@ def get_scores(infer_fn, tokenize_func, sample_batch, model_forward_micro_batch_
     return labels, scores
 
 
-@hydra_runner(config_path="/u/bathen/src/github.com/NeMo-Aligner2/examples/nlp/gpt/conf/", config_name="inference_rm")
+@hydra_runner(config_path="conf", config_name="inference_rm")
 def main(cfg) -> None:
-
-    default_dataset="allenai/reward-bench"
 
     cfg.model = load_and_override_model_config(cfg.rm_model_file, cfg.model)
     trainer = Trainer(strategy=NLPDDPStrategy(), **cfg.trainer)
@@ -388,8 +369,6 @@ def main(cfg) -> None:
 
     # now, load datasets...
     print_rank_0("Running core eval dataset.")
-    #tokenizer = AutoTokenizer.from_pretrained('/proj/checkpoints/bathen/models/base/mistral7bv3')
-    # or ptl_model.tokenizer
 
     # primary set compiles slightly more information
     dataset, subsets = load_eval_dataset(
