@@ -2,8 +2,6 @@ import torch
 
 from megatron.core import parallel_state
 from pytorch_lightning.trainer.trainer import Trainer
-#from pytriton.model_config import ModelConfig
-#from pytriton.model_config.common import DynamicBatcher
 from pytriton.model_config import Tensor
 
 import threading
@@ -18,7 +16,6 @@ from nemo_aligner.utils.train_script_utils import init_distributed
 from nemo_aligner.utils.utils import load_and_override_model_config, load_from_nemo, set_autocast_gpu_dtype
 
 from nemo_aligner.utils.distributed import run_distributed_inference
-from nemo_aligner.utils.server_utils import decode_bytes_ndarray, pad_input
 from nemo_aligner.utils.server_utils import (
     calculate_inference_batch_padding_multiple,
     pad_batch_and_strip_sequence
@@ -32,8 +29,6 @@ import numpy as np
 from rewardbench import load_eval_dataset
 from rewardbench.constants import EXAMPLE_COUNTS, SUBSET_MAPPING
 from rewardbench.utils import calculate_scores_per_section
-
-from transformers import AutoTokenizer
 
 import logging
 import sys
@@ -138,14 +133,6 @@ def dataloader_to_template(data):
         }
     ]
 
-    {   "conversations": [
-                {"value": "explain master slave replication nsql", "from": "User", "label": null}, 
-                {"value": "In the context of NoSQL databases, master-slave replication refers to a configuration where a single master node writes data, and one or more slave nodes read data from the master and replicate it to provide read scalability. The master node is responsible for accepting write requests and updating its own data, while the slave nodes are responsible for replicating the data from the master and serving read requests.\n\nIn this configuration, the master node is the only node that can make          changes to the data, while the slave nodes can only read the data and replicate it. This ensures that the data is consistent across all nodes and that there is no data loss in case of a failure of a single node.\n\nMaster-slave replication in NoSQL databases can be implemented using various technologies, such as Apache Cassandra, MongoDB, and Apache HBase. In each of these databases, the master-slave replication configuration can be set up using specific configuration options and parameters.\n\nIt's worth noting that master-slave replication is not a failover solution, as the failure of the master node will result in the loss of data until the node is brought back online. Therefore, it's important to have a proper disaster recovery plan in place to ensure that data is protected in case of a failure.",  "from": "Assistant", "label": "helpfulness:4,correctness:4,coherence:4,complexity:3,verbosity:2"}
-            ], 
-            "system": "A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions.", 
-            "mask": "User", 
-            "type": "VALUE_TO_TEXT"
-    }
     """
     samples = []
 
