@@ -212,7 +212,7 @@ def get_scores(infer_fn, tokenize_func, sample_batch, model_forward_micro_batch_
         if len(reward) == 2: # likely 2d arr
             reward = reward[0]
 
-        # hack, check if we have 5 or 9 scores
+        # hack, check if we have 5 or 9 scores (for helpsteer vs helpsteer2 type or datasets)
         if len(reward) == 9: 
             valid_5 = False
         elif len(reward) == 5:
@@ -344,9 +344,7 @@ def main(cfg) -> None:
         scores_chosen.extend(score_chosen_batch)
         scores_rejected.extend(score_rejected_batch)
 
-    if len(results) == 0:
-         print_rank_0("No results")
-    else:
+    if torch.distributed.get_rank() == 0: #agg rank 0
 
         ############################
         # compile scores
