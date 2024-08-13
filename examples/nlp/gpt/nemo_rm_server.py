@@ -16,6 +16,8 @@ from nemo_aligner.utils.server_utils import (
     pad_batch_and_strip_sequence
 )
 
+from utils.rpc import RPCServer
+
 SYSTEM_PROMPT = (
     "A chat between a curious user and an artificial intelligence assistant. "
     "The assistant gives helpful, detailed, and polite answers to the user's questions."
@@ -39,6 +41,7 @@ REWARD_VECTOR_340B = [0, 0, 0, 0, 0.3, 0.74, 0.46, 0.47, -0.33]
 REWARD_VECTOR_70B = [0, 0, 0, 0, 0.65, 0.8, 0.45,0.55, -0.4]
 REWARD_VECTOR = REWARD_VECTOR_340B
 
+GLOBAL_CONFIG = dict()
 
 def print_rank_0(message):
     """If distributed is initialized, print only on rank 0."""
@@ -195,6 +198,58 @@ def get_scores(infer_fn, tokenize_func, sample_batch, model_forward_micro_batch_
     return labels, scores
 
 
+def get_rm_scores(sentence_batch):
+    """
+    Takes a string and returns a raw score. String to be formatted by user.
+
+    Returns a dict of labels and scores
+    """
+    infer_fn = GLOBAL_CONFIG['infer_fn']
+    tokenize_func = GLOBAL_CONFIG['tokenize_func']
+    model_forward_micro_batch_size = GLOBAL_CONFIG['model_forward_micro_batch_size']
+    strip_sequence_length_to_multiple = GLOBAL_CONFIG['strip_sequence_length_to_multiple']
+
+    reward_batch = get_reward(
+        sentence_batch, 
+        infer_fn=infer_fn, 
+        tokenize_func=tokenize_func, 
+        model_forward_micro_batch_size=model_forward_micro_batch_size, 
+        strip_sequence_length_to_multiple=strip_sequence_length_to_multiple
+    )
+
+    reward_out = dict()
+    reward_out['labels'] = []
+    reward_out['scores'] = []
+
+    for reward in reward_batch:
+
+        if len(reward) == 2: # likely 2d arr
+            reward = reward[0]
+
+        # hack, check if we have 5 or 9 scores
+        if len(reward) == 9: 
+            valid_5 = False
+        elif len(reward) == 5:
+            valid_5 = True
+        else:
+            continue
+
+        reward_each = [min(4.0, max(0.0, float(r))) for r in reward]
+        reward_each = [round(r) for r in reward_each]
+
+        if valid_5:
+            reward_string = ",".join(f"{a}:{r}" for a, r in zip(HELPSTEER_ATTRIBUTES, reward_each))
+            score = sum([REWARD_VECTOR[4:][i] * reward[i] for i in range(0,len(REWARD_VECTOR[4:]))])
+        else:
+            reward_string = ",".join(f"{a}:{r}" for a, r in zip(ALL_STEERLM_ATTRIBUTES, reward_each))
+            score = sum([REWARD_VECTOR[i] * reward[i] for i in range(0,len(REWARD_VECTOR))])
+        
+        reward_out['labels'] .append(reward_string)
+        reward_out['scores'].append(score)
+
+    return reward_out
+
+
 @hydra_runner(config_path="conf", config_name="inference_rm")
 def main(cfg) -> None:
 
@@ -238,32 +293,19 @@ def main(cfg) -> None:
     model_forward_micro_batch_size = cfg.model.get("forward_micro_batch_size", cfg.model.micro_batch_size)
     strip_sequence_length_to_multiple = cfg.inference.get("strip_sequence_length_to_multiple", None)
 
-    batch = [
-        {'content': 
-            [
-                'How do I detail a car?', 
-                'Who created the Superman cartoon character?'
-            ], 
-            'role': 
-            [
-                'user', 
-                'user'
-            ]
-        }, 
-        {'content': 
-            [
-                "Detailing a car involves a thorough cleaning inside and out, as well as polishing and waxing to protect the vehicle's surfaces. Here's a step-by-step guide to detailing a car:\n\n**Exterior Detailing:**\n\n1. **Wash the Car:**\n   - Rinse the car with water to remove loose dirt.\n   - Use a car wash soap and microfiber wash mitt to clean the car from top to bottom.\n   - Clean the wheels and tires with a brush and a wheel cleaner.\n   - Rinse the car thoroughly to remove all soap.\n\n2. **Dry the Car:**\n   - Use a microfiber towel or a chamois to dry the car to prevent water spots.\n\n3. **Clay Bar Treatment:**\n   - Use a clay bar with a lubricant to remove embedded surface contaminants from the paint.\n\n4. **Polishing:**\n   - Apply car polish with a dual-action polisher or by hand to correct paint imperfections and create a smooth surface.\n\n5. **Waxing:**\n   - Apply a coat of wax or paint sealant to protect the paint and give it a glossy finish.\n\n6. **Windows and Mirrors:**\n   - Clean the windows and mirrors with a glass cleaner and a microfiber towel.\n\n7. **Tire and Trim Dressing:**\n   - Apply a tire dressing to the tires for a shiny finish.\n   - Use a trim restorer or protectant on plastic and rubber parts to prevent fading.\n\n**Interior Detailing:**\n\n1. **Remove Trash:**\n   - Clear out any trash and remove personal items from the car.\n\n2. **Vacuum:**\n   - Vacuum the seats, carpets, floor mats, and trunk.\n   - Use a brush attachment for the dashboard and door panels.\n\n3. **Shampoo Carpets and Upholstery:**\n   - Use a carpet cleaner and a brush to clean the carpets and upholstery.\n   - For leather interiors, use a leather cleaner and conditioner.\n\n4. **Clean Hard Surfaces:**\n   - Wipe down all hard surfaces (dashboard, center console, door panels, etc.) with a mild all-purpose cleaner and a microfiber cloth.\n\n5. **Windows and Mirrors:**\n   - Clean the interior side of windows and mirrors.\n\n6. **Air Vents and Crevices:**\n   - Use a detailing brush or compressed air to clean out air vents and hard-to-reach crevices.\n\n7. **Final Touches:**\n   - Apply a protectant to the dashboard and other plastic components.\n   - Replace air fresheners if needed.\n\n**Additional Tips:**\n\n- Work in the shade or a cool, well-ventilated garage to prevent products from drying too quickly and leaving residue.\n- Use separate buckets for washing and rinsing to avoid contaminating the clean water with dirt.\n- Always use gentle, non-abrasive materials and cleaners specifically designed for automotive use to avoid damaging surfaces.\n- Move in a systematic way to ensure you don't miss any spots.\n\nBy following these steps, you'll give your car a thorough clean that not only makes it look great but also helps in maintaining its value. Remember, regular detailing can prevent wear and tear and keep your car looking new for years to come.", 
-                "Superman, the iconic comic book superhero, was created by writer Jerry Siegel and artist Joe Shuster. Superman first appeared in Action Comics #1, which was published by Detective Comics, Inc. (later DC Comics) in June 1938. The character's immense popularity established him as one of the most enduring and recognizable figures in the superhero genre."
-            ], 
-            'role': [
-                'assistant', 
-                'assistant'
-            ]
-        }
-    ]
+    GLOBAL_CONFIG['infer_fn'] = infer_fn
+    GLOBAL_CONFIG['tokenize_func'] = tokenize_func
+    GLOBAL_CONFIG['model_forward_micro_batch_size'] = model_forward_micro_batch_size
+    GLOBAL_CONFIG['strip_sequence_length_to_multiple'] = strip_sequence_length_to_multiple
 
-    labels, scores = get_scores(infer_fn, tokenize_func, batch, model_forward_micro_batch_size=model_forward_micro_batch_size, strip_sequence_length_to_multiple=strip_sequence_length_to_multiple)
-    print_rank_0(labels, scores)
+    port = cfg.inference.get("port", 7777) #must be an int
+    host = cfg.inference.get("host", '0.0.0.0') #must be a str
+ 
+    server = RPCServer(host=host, port=port)
+
+    server.registerMethod(get_rm_scores)
+
+    server.run()
 
 if __name__ == "__main__":
     with torch.no_grad():
