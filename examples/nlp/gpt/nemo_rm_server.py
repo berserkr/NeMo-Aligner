@@ -298,14 +298,17 @@ def main(cfg) -> None:
     GLOBAL_CONFIG['model_forward_micro_batch_size'] = model_forward_micro_batch_size
     GLOBAL_CONFIG['strip_sequence_length_to_multiple'] = strip_sequence_length_to_multiple
 
-    port = cfg.inference.get("port", 7777) #must be an int
-    host = cfg.inference.get("host", '0.0.0.0') #must be a str
- 
-    server = RPCServer(host=host, port=port)
+    if torch.distributed.is_initialized():
 
-    server.registerMethod(get_rm_scores)
+        port = cfg.inference.get("port", 7777) + torch.distributed.get_local_rank() #must be an int
+        host = cfg.inference.get("host", '0.0.0.0') #must be a str
 
-    server.run()
+        print(f'Starting server on {host}:{port} for rank={torch.distributed.get_local_rank()}')
+    
+        if torch.distributed.get_rank() == 0:
+            server = RPCServer(host=host, port=port)
+            server.registerMethod(get_rm_scores)
+            server.run()
 
 if __name__ == "__main__":
     with torch.no_grad():
