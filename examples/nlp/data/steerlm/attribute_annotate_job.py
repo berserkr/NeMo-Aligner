@@ -1,5 +1,11 @@
 import torch
 
+from tqdm import tqdm, trange
+import os
+from typing import List
+import jsonlines
+import json
+
 from pytorch_lightning.trainer.trainer import Trainer
 from typing import List
 
@@ -243,8 +249,49 @@ def get_scores(infer_fn, tokenize_func, sample_batch, model_forward_micro_batch_
     return labels, scores
 
 
+def get_key(l):
+    convs = [c["value"] for c in l["conversations"]]
+    return "".join(convs)
+
+
 @hydra_runner(config_path="conf", config_name="inference_rm")
 def main(cfg) -> None:
+    # load the data to annotate
+    inference_output = cfg.output_file
+
+    exist = set()
+    if os.path.exists(inference_output):
+        with jsonlines.open(inference_output) as reader:
+            for obj in tqdm(reader):
+                exist.add(get_key(obj))
+
+    fout = open(inference_output, "a", encoding="utf-8")
+
+    all_samples, inputs = [], []
+
+    with jsonlines.open(cfg.input_file) as reader:
+        for obj in tqdm(reader):
+            if get_key(obj) in exist:
+                continue
+            user = obj["mask"]
+            turns = []
+            text = SYSTEM_PROMPT_TEMPLATE.format(value=SYSTEM_PROMPT)
+            for turn in obj["conversations"]:
+                value = turn["value"]
+                if turn["from"] == user:
+                    text += USER_TURN_TEMPLATE.format(value=value)
+                else:
+                    text += ASSISTANT_TURN_TEMPLATE.format(value=value)
+                if "label" in turn and turn["label"] is not None:
+                    out_text = text + LABEL_PREFIX
+                    turns.append(out_text)
+
+            all_samples.append(turns)
+            inputs.append(obj)
+
+    print(f"exist {len(exist)}, rest {len(inputs)}")
+    if len(inputs) == 0:
+        exit(0)
 
     # Load the model
     cfg.model = load_and_override_model_config(cfg.rm_model_file, cfg.model)
@@ -286,33 +333,33 @@ def main(cfg) -> None:
     model_forward_micro_batch_size = cfg.model.get("forward_micro_batch_size", cfg.model.micro_batch_size)
     strip_sequence_length_to_multiple = cfg.inference.get("strip_sequence_length_to_multiple", None)
 
-    batch = [
-        {'content': 
-            [
-                'How do I detail a car?', 
-                'Who created the Superman cartoon character?'
-            ], 
-            'role': 
-            [
-                'user', 
-                'user'
-            ]
-        }, 
-        {'content': 
-            [
-                "Detailing a car involves a thorough cleaning inside and out, as well as polishing and waxing to protect the vehicle's surfaces. Here's a step-by-step guide to detailing a car:\n\n**Exterior Detailing:**\n\n1. **Wash the Car:**\n   - Rinse the car with water to remove loose dirt.\n   - Use a car wash soap and microfiber wash mitt to clean the car from top to bottom.\n   - Clean the wheels and tires with a brush and a wheel cleaner.\n   - Rinse the car thoroughly to remove all soap.\n\n2. **Dry the Car:**\n   - Use a microfiber towel or a chamois to dry the car to prevent water spots.\n\n3. **Clay Bar Treatment:**\n   - Use a clay bar with a lubricant to remove embedded surface contaminants from the paint.\n\n4. **Polishing:**\n   - Apply car polish with a dual-action polisher or by hand to correct paint imperfections and create a smooth surface.\n\n5. **Waxing:**\n   - Apply a coat of wax or paint sealant to protect the paint and give it a glossy finish.\n\n6. **Windows and Mirrors:**\n   - Clean the windows and mirrors with a glass cleaner and a microfiber towel.\n\n7. **Tire and Trim Dressing:**\n   - Apply a tire dressing to the tires for a shiny finish.\n   - Use a trim restorer or protectant on plastic and rubber parts to prevent fading.\n\n**Interior Detailing:**\n\n1. **Remove Trash:**\n   - Clear out any trash and remove personal items from the car.\n\n2. **Vacuum:**\n   - Vacuum the seats, carpets, floor mats, and trunk.\n   - Use a brush attachment for the dashboard and door panels.\n\n3. **Shampoo Carpets and Upholstery:**\n   - Use a carpet cleaner and a brush to clean the carpets and upholstery.\n   - For leather interiors, use a leather cleaner and conditioner.\n\n4. **Clean Hard Surfaces:**\n   - Wipe down all hard surfaces (dashboard, center console, door panels, etc.) with a mild all-purpose cleaner and a microfiber cloth.\n\n5. **Windows and Mirrors:**\n   - Clean the interior side of windows and mirrors.\n\n6. **Air Vents and Crevices:**\n   - Use a detailing brush or compressed air to clean out air vents and hard-to-reach crevices.\n\n7. **Final Touches:**\n   - Apply a protectant to the dashboard and other plastic components.\n   - Replace air fresheners if needed.\n\n**Additional Tips:**\n\n- Work in the shade or a cool, well-ventilated garage to prevent products from drying too quickly and leaving residue.\n- Use separate buckets for washing and rinsing to avoid contaminating the clean water with dirt.\n- Always use gentle, non-abrasive materials and cleaners specifically designed for automotive use to avoid damaging surfaces.\n- Move in a systematic way to ensure you don't miss any spots.\n\nBy following these steps, you'll give your car a thorough clean that not only makes it look great but also helps in maintaining its value. Remember, regular detailing can prevent wear and tear and keep your car looking new for years to come.", 
-                "Superman, the iconic comic book superhero, was created by writer Jerry Siegel and artist Joe Shuster. Superman first appeared in Action Comics #1, which was published by Detective Comics, Inc. (later DC Comics) in June 1938. The character's immense popularity established him as one of the most enduring and recognizable figures in the superhero genre."
-            ], 
-            'role': [
-                'assistant', 
-                'assistant'
-            ]
-        }
-    ]
+    for idx in trange(0, len(all_samples)):
 
-    labels, scores = get_scores(infer_fn, tokenize_func, batch, model_forward_micro_batch_size=model_forward_micro_batch_size, strip_sequence_length_to_multiple=strip_sequence_length_to_multiple)
-    print_rank_0(labels, scores)
+        input = inputs[idx]
+        sample = all_samples[idx]
+
+        labels, scores = get_scores(
+            infer_fn, tokenize_func, sample, 
+            model_forward_micro_batch_size=model_forward_micro_batch_size, 
+            strip_sequence_length_to_multiple=strip_sequence_length_to_multiple)
+        
+        print_rank_0(labels, scores)
+        
+        t = 0
+        for turn in input["conversations"]:
+            if "label" in turn and turn["label"] is not None:
+                turn["label"] = labels[t]
+
+        assert t == len(labels)
+
+        fout.write(json.dumps(input) + "\n")
+
+    print("all annotations finished")
+    fout.close()
+
+
 
 if __name__ == "__main__":
     with torch.no_grad():
         main()
+

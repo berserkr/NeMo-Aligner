@@ -82,8 +82,6 @@ def generate(
         tokens.shape[0], model_forward_micro_batch_size
     )
 
-    print(f'pad_batch_to_multiple: {pad_batch_to_multiple}')
-
     inputs, extra, _ = pad_batch_and_strip_sequence(
         tokens,
         sequence_lengths,
