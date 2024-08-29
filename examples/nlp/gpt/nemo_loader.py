@@ -138,7 +138,6 @@ def tokenize_batch(sentences, tokenizer, max_len, add_BOS=False, add_EOS=False):
         """Tokenize method that truncates and returns extra tokens..."""
         output = tokenizer.text_to_ids(sentence)
 
-        extra_tokens = None
         added_tokens = 0
 
         if add_EOS:
@@ -150,7 +149,6 @@ def tokenize_batch(sentences, tokenizer, max_len, add_BOS=False, add_EOS=False):
         output_len = len(output)
 
         if output_len >= max_len:
-            extra_tokens = output[max_len-added_tokens:]
             output = output[:max_len-added_tokens]
 
         if add_BOS:
@@ -159,9 +157,9 @@ def tokenize_batch(sentences, tokenizer, max_len, add_BOS=False, add_EOS=False):
         if add_EOS:
             output.append(tokenizer.eos_id)
 
-        return output, extra_tokens
+        return output
 
-    context_tokens, extra_tokens = list(map(tokenize, sentences))
+    context_tokens = list(map(tokenize, sentences))
     max_sequence_length = max(len(x) for x in context_tokens)
 
     context_tokens, context_lengths = pad_batch(
@@ -171,16 +169,15 @@ def tokenize_batch(sentences, tokenizer, max_len, add_BOS=False, add_EOS=False):
 
     context_tokens_tensor = torch.cuda.LongTensor(context_tokens)
     context_length_tensor = torch.cuda.LongTensor(context_lengths)
-    context_extra_tensor = torch.cuda.LongTensor(extra_tokens)
 
-    return context_tokens_tensor, context_length_tensor, context_extra_tensor
+    return context_tokens_tensor, context_length_tensor
 
 
 def get_reward(
     sentences: List[str], infer_fn, tokenize_func, model_forward_micro_batch_size = [2], strip_sequence_length_to_multiple = None
 ):
 
-    tokens, sequence_lengths = tokenize_func(sentences)
+    tokens, sequence_lengths = tokenize_func(sentences) #uses custom tokenize batch that returnjs extra tokens
     sequence_lengths = sequence_lengths.unsqueeze(-1)
 
     pad_batch_to_multiple = calculate_inference_batch_padding_multiple(

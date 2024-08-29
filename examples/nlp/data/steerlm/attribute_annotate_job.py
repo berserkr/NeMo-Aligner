@@ -143,8 +143,6 @@ def tokenize_batch(sentences, tokenizer, max_len, add_BOS=False, add_EOS=False):
     def tokenize(sentence):
         """Tokenize method that truncates and returns extra tokens..."""
         output = tokenizer.text_to_ids(sentence)
-
-        extra_tokens = None
         added_tokens = 0
 
         if add_EOS:
@@ -156,7 +154,6 @@ def tokenize_batch(sentences, tokenizer, max_len, add_BOS=False, add_EOS=False):
         output_len = len(output)
 
         if output_len >= max_len:
-            extra_tokens = output[max_len-added_tokens:]
             output = output[:max_len-added_tokens]
 
         if add_BOS:
@@ -165,9 +162,9 @@ def tokenize_batch(sentences, tokenizer, max_len, add_BOS=False, add_EOS=False):
         if add_EOS:
             output.append(tokenizer.eos_id)
 
-        return output, extra_tokens
+        return output
 
-    context_tokens, extra_tokens = list(map(tokenize, sentences))
+    context_tokens = list(map(tokenize, sentences))
     max_sequence_length = max(len(x) for x in context_tokens)
 
     context_tokens, context_lengths = pad_batch(
@@ -177,16 +174,15 @@ def tokenize_batch(sentences, tokenizer, max_len, add_BOS=False, add_EOS=False):
 
     context_tokens_tensor = torch.cuda.LongTensor(context_tokens)
     context_length_tensor = torch.cuda.LongTensor(context_lengths)
-    context_extra_tensor = torch.cuda.LongTensor(extra_tokens)
 
-    return context_tokens_tensor, context_length_tensor, context_extra_tensor
+    return context_tokens_tensor, context_length_tensor
 
 
 def get_reward(
     sentences: List[str], infer_fn, tokenize_func, model_forward_micro_batch_size = [2], strip_sequence_length_to_multiple = None
 ):
 
-    tokens, sequence_lengths = tokenize_func(sentences)
+    tokens, sequence_lengths = tokenize_func(sentences) #uses tokenize batch, which returns tokens, seq lens, extra tokens
     sequence_lengths = sequence_lengths.unsqueeze(-1)
 
     pad_batch_to_multiple = calculate_inference_batch_padding_multiple(
@@ -208,13 +204,11 @@ def get_reward(
 def get_scores(infer_fn, tokenize_func, sample_batch, model_forward_micro_batch_size, strip_sequence_length_to_multiple):
     """
     infer_fn: inference funct
-    sample_batch: batch of sentences
+    sample_batch: batch of sentences already formatted
     """
 
-    samples = dataloader_to_template(sample_batch)
-
     reward_batch = get_reward(
-        samples, infer_fn=infer_fn, tokenize_func=tokenize_func, model_forward_micro_batch_size=model_forward_micro_batch_size, strip_sequence_length_to_multiple=strip_sequence_length_to_multiple
+        sample_batch, infer_fn=infer_fn, tokenize_func=tokenize_func, model_forward_micro_batch_size=model_forward_micro_batch_size, strip_sequence_length_to_multiple=strip_sequence_length_to_multiple
     )
 
     labels = []
@@ -256,42 +250,6 @@ def get_key(l):
 
 @hydra_runner(config_path="conf", config_name="inference_rm")
 def main(cfg) -> None:
-    # load the data to annotate
-    inference_output = cfg.output_file
-
-    exist = set()
-    if os.path.exists(inference_output):
-        with jsonlines.open(inference_output) as reader:
-            for obj in tqdm(reader):
-                exist.add(get_key(obj))
-
-    fout = open(inference_output, "a", encoding="utf-8")
-
-    all_samples, inputs = [], []
-
-    with jsonlines.open(cfg.input_file) as reader:
-        for obj in tqdm(reader):
-            if get_key(obj) in exist:
-                continue
-            user = obj["mask"]
-            turns = []
-            text = SYSTEM_PROMPT_TEMPLATE.format(value=SYSTEM_PROMPT)
-            for turn in obj["conversations"]:
-                value = turn["value"]
-                if turn["from"] == user:
-                    text += USER_TURN_TEMPLATE.format(value=value)
-                else:
-                    text += ASSISTANT_TURN_TEMPLATE.format(value=value)
-                if "label" in turn and turn["label"] is not None:
-                    out_text = text + LABEL_PREFIX
-                    turns.append(out_text)
-
-            all_samples.append(turns)
-            inputs.append(obj)
-
-    print(f"exist {len(exist)}, rest {len(inputs)}")
-    if len(inputs) == 0:
-        exit(0)
 
     # Load the model
     cfg.model = load_and_override_model_config(cfg.rm_model_file, cfg.model)
@@ -333,31 +291,70 @@ def main(cfg) -> None:
     model_forward_micro_batch_size = cfg.model.get("forward_micro_batch_size", cfg.model.micro_batch_size)
     strip_sequence_length_to_multiple = cfg.inference.get("strip_sequence_length_to_multiple", None)
 
+    # load the data to annotate
+    inference_output = cfg.output_file
+
+    exist = set()
+    if os.path.exists(inference_output):
+        with jsonlines.open(inference_output) as reader:
+            for obj in tqdm(reader):
+                exist.add(get_key(obj))
+
+    if torch.distributed.get_rank() == 0: # do all loading in rank0
+        fout = open(inference_output, "a", encoding="utf-8")
+
+    all_samples, inputs = [], []
+
+    with jsonlines.open(cfg.input_file) as reader:
+        for obj in tqdm(reader):
+            if get_key(obj) in exist:
+                continue
+            user = obj["mask"]
+            turns = []
+            text = SYSTEM_PROMPT_TEMPLATE.format(value=SYSTEM_PROMPT)
+            for turn in obj["conversations"]:
+                value = turn["value"]
+                if turn["from"] == user:
+                    text += USER_TURN_TEMPLATE.format(value=value)
+                else:
+                    text += ASSISTANT_TURN_TEMPLATE.format(value=value)
+                if "label" in turn and turn["label"] is not None:
+                    out_text = text + LABEL_PREFIX
+                    turns.append(out_text)
+
+            all_samples.append(turns)
+            inputs.append(obj)
+
+    print(f"exist {len(exist)}, rest {len(inputs)}")
+    if len(inputs) == 0:
+        exit(0)
+
     for idx in trange(0, len(all_samples)):
 
         input = inputs[idx]
         sample = all_samples[idx]
 
-        labels, scores = get_scores(
+        labels, _ = get_scores(
             infer_fn, tokenize_func, sample, 
             model_forward_micro_batch_size=model_forward_micro_batch_size, 
             strip_sequence_length_to_multiple=strip_sequence_length_to_multiple)
         
-        print_rank_0(labels, scores)
-        
-        t = 0
-        for turn in input["conversations"]:
-            if "label" in turn and turn["label"] is not None:
-                turn["label"] = labels[t]
+        print_rank_0(labels)
 
-        assert t == len(labels)
+        if torch.distributed.get_rank() == 0: # do all loading in rank0
+            t = 0
+            for turn in input["conversations"]:
+                if "label" in turn and turn["label"] is not None:
+                    turn["label"] = labels[t]
+                    t += 1
 
-        fout.write(json.dumps(input) + "\n")
+            assert t == len(labels)
 
-    print("all annotations finished")
-    fout.close()
+            fout.write(json.dumps(input) + "\n")
 
-
+    if torch.distributed.get_rank() == 0: # do all loading in rank0
+        print("all annotations finished")
+        fout.close()
 
 if __name__ == "__main__":
     with torch.no_grad():
