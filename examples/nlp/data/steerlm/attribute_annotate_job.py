@@ -345,7 +345,7 @@ def main(cfg) -> None:
             t = 0
             for turn in input["conversations"]:
                 if "label" in turn and turn["label"] is not None:
-                    turn["label"] = labels[t]
+                    turn["label"] = labels[t]['reward_string'] # need to extract the actual rewards
                     t += 1
 
             assert t == len(labels)
